@@ -17,8 +17,8 @@ st.title("Hybrid Movie Recommendation System")
 
 @st.cache_data
 def load_and_preprocess_data():
-    movies_path = r"D:\hyprid recommendation system\movies.csv"
-    ratings_path = r"D:\hyprid recommendation system\ratings.csv"
+    movies_path = r"movies.csv"
+    ratings_path = r"ratings.csv"
     movies = pd.read_csv(movies_path)
     ratings = pd.read_csv(ratings_path)
     
