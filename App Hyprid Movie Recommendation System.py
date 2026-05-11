@@ -13,8 +13,8 @@ st.set_page_config(page_title="Movie Recommendation Engine", layout="wide")
 @st.cache_resource
 def train_models_from_scratch():
     # 1. Load Cleaned Datasets
-    movies_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned movies.csv')
-    ratings_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned ratings.csv')
+    movies_df = pd.read_csv('Cleaned movies.csv')
+    ratings_df = pd.read_csv('Cleaned ratings.csv')
     
     # 2. Build Content-Based Model (TF-IDF & Cosine Similarity)
     # Assuming genres or tags are used for similarity
