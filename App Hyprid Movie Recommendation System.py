@@ -10,15 +10,15 @@ st.set_page_config(page_title="Hybrid Movie Recommender", layout="wide")
 @st.cache_resource
 def load_assets():
     # Load Datasets
-    movies_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned movies.csv')
-    ratings_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned ratings.csv')
+    movies_df = pd.read_csv('Cleaned movies.csv')
+    ratings_df = pd.read_csv('Cleaned ratings.csv')
     
     # Load Models
-    with open('D:/2305388_Abdullah Mohamed Elgondakly/tfidf_model.pkl', 'rb') as f:
+    with open('tfidf_model.pkl', 'rb') as f:
         tfidf_data = pickle.load(f)
-    with open('D:/2305388_Abdullah Mohamed Elgondakly/cosine_similarity_model.pkl', 'rb') as f:
+    with open('cosine_similarity_model.pkl', 'rb') as f:
         cosine_data = pickle.load(f)
-    _, svd_model = dump.load('D:/2305388_Abdullah Mohamed Elgondakly/collaborative_model.surprise')
+    _, svd_model = dump.load('collaborative_model.surprise')
     
     # Precompute User Ratings Map for Content/Hybrid Logic
     user_ratings_map = ratings_df.groupby('userId').apply(
@@ -31,8 +31,6 @@ movies_df, ratings_df, cosine_data, svd_model, user_ratings_map = load_assets()
 cosine_sim = cosine_data['matrix']
 id_map = cosine_data['id_map']
 id_to_title = cosine_data['id_to_title']
-
-# --- HELPER FUNCTIONS ---
 
 def get_cb_prediction(uid, iid):
     if uid not in user_ratings_map or iid not in id_map:
