@@ -13,8 +13,8 @@ st.set_page_config(page_title="Movie Recommendation Engine", layout="wide")
 @st.cache_resource
 def train_models_from_scratch():
     #Load Cleaned Datasets
-    movies_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned movies.csv')
-    ratings_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned ratings.csv')
+    movies_df = pd.read_csv('Cleaned movies.csv')
+    ratings_df = pd.read_csv('Cleaned ratings.csv')
     
     #Build Content-Based Model
     tfidf = TfidfVectorizer(stop_words='english')
