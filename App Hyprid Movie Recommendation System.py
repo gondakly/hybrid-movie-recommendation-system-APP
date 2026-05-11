@@ -1,190 +1,135 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+import pickle
+from surprise import dump, accuracy
 from collections import defaultdict
 
-# Surprise Library Imports
-from surprise import SVD, Dataset, Reader, accuracy
+st.set_page_config(page_title="Hybrid Movie Recommender", layout="wide")
 
-#1. DATA INGESTION & PREPROCESSING
-st.set_page_config(page_title="Advanced Hybrid Recommender", layout="wide")
-st.title("Hybrid Movie Recommendation System")
-
-@st.cache_data
-def load_and_preprocess_data():
-    movies_path = r"movies.csv"
-    ratings_path = r"ratings.csv"
-    movies = pd.read_csv(movies_path)
-    ratings = pd.read_csv(ratings_path)
-    
-    # Preprocessing genres
-    movies['genres'] = movies['genres'].replace('(no genres listed)', 'Unknown').fillna('Unknown')
-    movies['genres_space'] = movies['genres'].str.replace('|', ' ', regex=False)
-    
-    return movies, ratings
-
-movies, ratings = load_and_preprocess_data()
-
-# --- 2. EVALUATION & SPLIT (80/20) ---
-train_df, test_df = train_test_split(ratings, test_size=0.2, random_state=42)
-
-# --- 3. CONTENT-BASED FILTERING (TF-IDF) ---
 @st.cache_resource
-def build_content_model(movies_df):
-    tfidf = TfidfVectorizer(stop_words='english')
-    tfidf_matrix = tfidf.fit_transform(movies_df['genres_space'])
-    cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
-    return cosine_sim
+def load_assets():
+    # Load Datasets
+    movies_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned movies.csv')
+    ratings_df = pd.read_csv('D:/2305388_Abdullah Mohamed Elgondakly/Cleaned ratings.csv')
+    
+    # Load Models
+    with open('D:/2305388_Abdullah Mohamed Elgondakly/tfidf_model.pkl', 'rb') as f:
+        tfidf_data = pickle.load(f)
+    with open('D:/2305388_Abdullah Mohamed Elgondakly/cosine_similarity_model.pkl', 'rb') as f:
+        cosine_data = pickle.load(f)
+    _, svd_model = dump.load('D:/2305388_Abdullah Mohamed Elgondakly/collaborative_model.surprise')
+    
+    # Precompute User Ratings Map for Content/Hybrid Logic
+    user_ratings_map = ratings_df.groupby('userId').apply(
+        lambda x: dict(zip(x['movieId'], x['rating']))
+    ).to_dict()
+    
+    return movies_df, ratings_df, cosine_data, svd_model, user_ratings_map
 
-cosine_sim = build_content_model(movies)
+movies_df, ratings_df, cosine_data, svd_model, user_ratings_map = load_assets()
+cosine_sim = cosine_data['matrix']
+id_map = cosine_data['id_map']
+id_to_title = cosine_data['id_to_title']
 
-# --- 4. COLLABORATIVE FILTERING (Surprise SVD) ---
-@st.cache_resource
-def build_svd_model(train_data):
-    reader = Reader(rating_scale=(0.5, 5.0))
-    data = Dataset.load_from_df(train_data[['userId', 'movieId', 'rating']], reader)
-    trainset = data.build_full_trainset()
-    
-    svd = SVD(n_factors=50, random_state=42)
-    svd.fit(trainset)
-    return svd
+# --- HELPER FUNCTIONS ---
 
-svd_model = build_svd_model(train_df)
+def get_cb_prediction(uid, iid):
+    if uid not in user_ratings_map or iid not in id_map:
+        return ratings_df['rating'].mean()
+    target_idx = id_map[iid]
+    sim_scores = cosine_sim[target_idx]
+    weighted_sum, sim_sum = 0, 0
+    for rated_mid, rating in user_ratings_map[uid].items():
+        if rated_mid in id_map:
+            sim = sim_scores[id_map[rated_mid]]
+            weighted_sum += (sim * rating)
+            sim_sum += sim
+    return weighted_sum / sim_sum if sim_sum > 0 else ratings_df['rating'].mean()
 
-# --- 5. HYBRID LOGIC & PREDICTION FUNCTION ---
-def predict_rating(user_id, movie_id, alpha=0.5):
-    # 1. CF Prediction
-    cf_score = svd_model.predict(user_id, movie_id).est
-    
-    # 2. CBF Prediction
-    user_ratings = train_df[train_df['userId'] == user_id]
-    if user_ratings.empty:
-        return cf_score
-    
-    try:
-        m_idx = movies[movies['movieId'] == movie_id].index[0]
-        top_m_ids = user_ratings.sort_values(by='rating', ascending=False).head(3)['movieId'].values
-        top_m_indices = movies[movies['movieId'].isin(top_m_ids)].index.tolist()
-        cbf_score_raw = np.mean(cosine_sim[m_idx, top_m_indices])
-        cbf_score = 0.5 + (cbf_score_raw * 4.5)
-    except:
-        cbf_score = 3.0
-        
-    return (alpha * cf_score) + ((1 - alpha) * cbf_score)
-
-def get_hybrid_recs(user_id, alpha=0.5, top_n=10):
-    all_movie_ids = movies['movieId'].unique()
-    user_ratings = train_df[train_df['userId'] == user_id]
-    if user_ratings.empty: return None
-    
-    seen_ids = user_ratings['movieId'].values
-    unseen_ids = [m for m in all_movie_ids if m not in seen_ids]
-    
-    predictions = []
-    for mid in unseen_ids:
-        score = predict_rating(user_id, mid, alpha)
-        predictions.append((mid, score))
-    
-    predictions.sort(key=lambda x: x[1], reverse=True)
-    top_predictions = predictions[:top_n]
-    
-    top_m_ids = [p[0] for p in top_predictions]
-    top_scores = [p[1] for p in top_predictions]
-    
-    res = movies[movies['movieId'].isin(top_m_ids)].copy()
-    res['predicted_rating'] = top_scores
-    return res.sort_values(by='predicted_rating', ascending=False)
-
-# --- 6. EVALUATION METRICS ---
-def precision_recall_at_k(predictions, k=10, threshold=3.5):
+def calculate_metrics(predictions, threshold=3.5):
+    rmse = accuracy.rmse(predictions, verbose=False)
+    mae = accuracy.mae(predictions, verbose=False)
     user_est_true = defaultdict(list)
     for uid, _, true_r, est, _ in predictions:
         user_est_true[uid].append((est, true_r))
-
-    precisions = dict()
-    recalls = dict()
-
+    precisions, recalls = [], []
     for uid, user_ratings in user_est_true.items():
         user_ratings.sort(key=lambda x: x[0], reverse=True)
-        n_rel = sum((true_r >= threshold) for (est, true_r) in user_ratings)
-        n_rec_k = sum((est >= threshold) for (est, true_r) in user_ratings[:k])
-        n_rel_and_rec_k = sum(((true_r >= threshold) and (est >= threshold)) for (est, true_r) in user_ratings[:k])
+        n_rel = sum((true_r >= threshold) for (_, true_r) in user_ratings)
+        n_rec_k = sum((est >= threshold) for (est, _) in user_ratings[:10])
+        n_rel_and_rec_k = sum(((true_r >= threshold) and (est >= threshold)) for (est, true_r) in user_ratings[:10])
+        precisions.append(n_rel_and_rec_k / n_rec_k if n_rec_k != 0 else 0)
+        recalls.append(n_rel_and_rec_k / n_rel if n_rel != 0 else 0)
+    avg_p = np.mean(precisions)
+    avg_r = np.mean(recalls)
+    f1 = 2*(avg_p*avg_r)/(avg_p+avg_r) if (avg_p+avg_r) > 0 else 0
+    return {"RMSE": rmse, "MAE": mae, "Precision": avg_p, "Recall": avg_r, "F1-Score": f1}
 
-        precisions[uid] = n_rel_and_rec_k / n_rec_k if n_rec_k != 0 else 0
-        recalls[uid] = n_rel_and_rec_k / n_rel if n_rel != 0 else 0
+#
+st.title("Multi-Model Movie Recommendation System")
 
-    avg_precision = np.mean(list(precisions.values()))
-    avg_recall = np.mean(list(recalls.values()))
-    
-    # Calculate F1-Score
-    if (avg_precision + avg_recall) > 0:
-        f1 = 2 * (avg_precision * avg_recall) / (avg_precision + avg_recall)
-    else:
-        f1 = 0
-        
-    return avg_precision, avg_recall, f1
-
-def evaluate_models(alpha=0.5):
-    reader = Reader(rating_scale=(0.5, 5.0))
-    test_data_surprise = Dataset.load_from_df(test_df[['userId', 'movieId', 'rating']], reader).build_full_trainset().build_testset()
-    
-    # 1. CF Metrics
-    cf_preds = svd_model.test(test_data_surprise)
-    rmse_cf = accuracy.rmse(cf_preds, verbose=False)
-    mae_cf = accuracy.mae(cf_preds, verbose=False)
-    prec_cf, rec_cf, f1_cf = precision_recall_at_k(cf_preds)
-    
-    # 2. Hybrid Metrics
-    hybrid_preds = []
-    for uid, mid, true_r in test_data_surprise:
-        est = predict_rating(uid, mid, alpha)
-        hybrid_preds.append((uid, mid, true_r, est, None))
-        
-    rmse_hy = np.sqrt(mean_squared_error([x[2] for x in hybrid_preds], [x[3] for x in hybrid_preds]))
-    mae_hy = mean_absolute_error([x[2] for x in hybrid_preds], [x[3] for x in hybrid_preds])
-    prec_hy, rec_hy, f1_hy = precision_recall_at_k(hybrid_preds)
-    
-    return {
-        "CF": [rmse_cf, mae_cf, prec_cf, rec_cf, f1_cf],
-        "Hybrid": [rmse_hy, mae_hy, prec_hy, rec_hy, f1_hy]
-    }
-
-# --- 7. UI ---
-tab1, tab2 = st.tabs(["Recommendations", "Comparison Metrics"])
+tab1, tab2, tab3, tab4 = st.tabs(["Content-Based", "Collaborative", "Hybrid System", "Model Evaluation"])
 
 with tab1:
-    u_id = st.number_input("User ID", 1, 610, 1)
-    alpha_val = st.slider("Weight (Alpha)", 0.0, 1.0, 0.5)
-    if st.button("Get Recommendations"):
-        res = get_hybrid_recs(u_id, alpha=alpha_val)
-        if res is not None:
-            st.dataframe(res[['title', 'genres', 'predicted_rating']])
+    st.header("Content-Based Filtering (TF-IDF + Cosine)")
+    movie_choice = st.selectbox("Select a Movie you liked:", movies_df['title'].values, key="cb_movie")
+    if st.button("Get Content Recommendations"):
+        m_id = movies_df[movies_df['title'] == movie_choice]['movieId'].values[0]
+        idx = id_map[m_id]
+        sim_scores = list(enumerate(cosine_sim[idx]))
+        sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)[1:6]
+        
+        st.write("Top 5 similar movies based on genres:")
+        for i, score in sim_scores:
+            st.success(f"{id_to_title[idx_to_id := list(id_map.keys())[i]]}")
 
 with tab2:
-    if st.button("Calculate Performance"):
-        metrics = evaluate_models(alpha_val)
+    st.header("Collaborative Filtering (SVD)")
+    u_id = st.number_input("Enter User ID:", min_value=1, value=1, key="cf_user")
+    m_id_cf = st.number_input("Enter Movie ID to predict rating:", min_value=1, value=1, key="cf_movie")
+    if st.button("Predict User Preference"):
+        pred = svd_model.predict(u_id, m_id_cf)
+        st.metric("Predicted Rating", f"{pred.est:.2f} / 5.0")
+
+with tab3:
+    st.header("Hybrid Recommendation System")
+    h_uid = st.number_input("Enter User ID:", min_value=1, value=1, key="h_user")
+    h_mid = st.number_input("Enter Movie ID:", min_value=1, value=1, key="h_movie")
+    alpha = st.slider("Weight for Collaborative Model (Alpha)", 0.0, 1.0, 0.7)
+    
+    if st.button("Calculate Hybrid Score"):
+        cf_score = svd_model.predict(h_uid, h_mid).est
+        cb_score = get_cb_prediction(h_uid, h_mid)
+        hybrid_score = (alpha * cf_score) + ((1 - alpha) * cb_score)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Collaborative (SVD)")
-            st.metric("RMSE", round(metrics["CF"][0], 4))
-            st.metric("MAE", round(metrics["CF"][1], 4))
-            st.metric("Precision", round(metrics["CF"][2], 4))
-            st.metric("Recall", round(metrics["CF"][3], 4))
-            st.metric("F1-Score", round(metrics["CF"][4], 4))
-            
-        with col2:
-            st.subheader(f"Hybrid (Alpha={alpha_val})")
-            st.metric("RMSE", round(metrics["Hybrid"][0], 4))
-            st.metric("MAE", round(metrics["Hybrid"][1], 4))
-            st.metric("Precision", round(metrics["Hybrid"][2], 4))
-            st.metric("Recall", round(metrics["Hybrid"][3], 4))
-            st.metric("F1-Score", round(metrics["Hybrid"][4], 4))
-        
-        st.divider()
-        
+        col1, col2, col3 = st.columns(3)
+        col1.write(f"SVD Score: {cf_score:.2f}")
+        col2.write(f"Content Score: {cb_score:.2f}")
+        col3.write(f"**Final Hybrid: {hybrid_score:.2f}**")
+
+with tab4:
+    st.header("Model Evaluation Performance")
+    if st.button("Run Full Evaluation (Sampled)"):
+        with st.spinner("Calculating metrics..."):
+            test_data = ratings_df.sample(500, random_state=42)
+            svd_p, cb_p, hy_p = [], [], []
+
+            for _, row in test_data.iterrows():
+                u, i, r = int(row['userId']), int(row['movieId']), row['rating']
+                # CF
+                cf_est = svd_model.predict(u, i).est
+                svd_p.append((u, i, r, cf_est, None))
+                # CB
+                cb_est = get_cb_prediction(u, i)
+                cb_p.append((u, i, r, cb_est, None))
+                # Hybrid
+                hy_est = (0.7 * cf_est) + (0.3 * cb_est)
+                hy_p.append((u, i, r, hy_est, None))
+
+            report = {
+                "Collaborative (SVD)": calculate_metrics(svd_p),
+                "Content-Based": calculate_metrics(cb_p),
+                "Hybrid Engine": calculate_metrics(hy_p)
+            }
+            st.table(pd.DataFrame(report).T)
