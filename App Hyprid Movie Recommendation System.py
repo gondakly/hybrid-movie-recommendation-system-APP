@@ -52,10 +52,10 @@ with st.spinner("Initializing Recommendation Engines..."):
 #POSTER FETCHING
 @st.cache_data(ttl=3600)
 def fetch_poster(movie_title):
-    """Fetch poster from TMDB API using movie title."""
+    #Fetch poster from TMDB API using movie title.
     try:
         # Replace with your own TMDB API key
-        API_KEY = "YOUR_TMDB_API_KEY_HERE"  
+        API_KEY = "7941554e3311e08372b05ed20db20ba1"  
         search_url = f"https://api.themoviedb.org/3/search/movie?api_key={API_KEY}&query={movie_title}"
         response = requests.get(search_url)
         data = response.json()
