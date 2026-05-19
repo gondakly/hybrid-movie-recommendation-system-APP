@@ -6,7 +6,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from surprise import Dataset, Reader, SVD
 from surprise import accuracy
 from collections import defaultdict
-import requests  # Added for fetching posters
+import requests
+import urllib.parse  # Added for better URL encoding
 
 # Page config
 st.set_page_config(page_title="Movie Recommendation Engine", layout="wide")
@@ -49,45 +50,61 @@ with st.spinner("Initializing Recommendation Engines..."):
         st.error(f"Error loading files: {e}")
         st.stop()
 
-#POSTER FETCHING
-@st.cache_data(ttl=3600)
-def fetch_poster(movie_title):
-    #Fetch poster from TMDB API using movie title.
+# IMPROVED POSTER FETCHING
+@st.cache_data(ttl=7200, show_spinner=False)
+def fetch_poster(movie_title, year=None):
+    if not movie_title:
+        return None
     try:
-        # Replace with your own TMDB API key
-        API_KEY = "7941554e3311e08372b05ed20db20ba1"  
-        search_url = f"https://api.themoviedb.org/3/search/movie?api_key={API_KEY}&query={movie_title}"
-        response = requests.get(search_url)
-        data = response.json()
+        # CHANGE THIS TO YOUR REAL TMDB API KEY 
+        API_KEY = "7941554e3311e08372b05ed20db20ba1"
         
-        if data['results']:
-            poster_path = data['results'][0].get('poster_path')
-            if poster_path:
-                return f"https://image.tmdb.org/t/p/w500{poster_path}"
+        query = urllib.parse.quote(movie_title.strip())
+        url = f"https://api.themoviedb.org/3/search/movie?api_key={API_KEY}&query={query}"
+        if year:
+            url += f"&year={year}"
+        
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('results'):
+                poster_path = data['results'][0].get('poster_path')
+                if poster_path:
+                    return f"https://image.tmdb.org/t/p/w500{poster_path}"
         return None
-    except:
+    except Exception as e:
+        # st.warning(f"Poster fetch error: {str(e)[:100]}")  # Uncomment for debugging
         return None
+
 
 def get_poster_url(movie_id):
-    #Get poster from movies_df if available, else fallback to API.
+    #Get poster with multiple fallback methods
     row = movies_df[movies_df['movieId'] == movie_id]
     if not row.empty:
-        # Prefer column if it exists (poster_path or poster_url)
-        if 'poster_path' in row.columns:
-            path = row['poster_path'].values[0]
-            if pd.notna(path) and str(path).strip():
-                return f"https://image.tmdb.org/t/p/w500{path}" if not str(path).startswith("http") else path
-        if 'poster_url' in row.columns:
-            url = row['poster_url'].values[0]
-            if pd.notna(url):
-                return url
-    # Fallback to title search
-    title = id_to_title.get(movie_id)
-    if title:
-        return fetch_poster(title)
-    return None
+        # Priority: Use poster column if it exists in your CSV
+        for col in ['poster_path', 'poster_url', 'poster']:
+            if col in row.columns:
+                val = row[col].values[0]
+                if pd.notna(val) and str(val).strip():
+                    if str(val).startswith("http"):
+                        return str(val)
+                    return f"https://image.tmdb.org/t/p/w500{val.lstrip('/')}"
+    
+    # Fallback: Search TMDB API
+    title = id_to_title.get(movie_id, "")
+    year = None
+    if "(" in title and ")" in title:
+        try:
+            year_str = title.split("(")[-1].split(")")[0]
+            year = int(year_str)
+        except:
+            pass
+    
+    return fetch_poster(title, year)
 
-#EXISTING FUNCTIONS
+
+# RECOMMENDATION FUNCTIONS
 def get_cb_prediction(uid, iid):
     if uid not in user_ratings_map or iid not in id_map:
         return ratings_df['rating'].mean()
@@ -100,6 +117,7 @@ def get_cb_prediction(uid, iid):
             weighted_sum += (sim * rating)
             sim_sum += sim
     return weighted_sum / sim_sum if sim_sum > 0 else ratings_df['rating'].mean()
+
 
 def get_top_recommendations(uid, model_type="SVD", alpha=0.7, n=10):
     seen_movies = set(user_ratings_map.get(uid, {}).keys())
@@ -119,7 +137,6 @@ def get_top_recommendations(uid, model_type="SVD", alpha=0.7, n=10):
     predictions.sort(key=lambda x: x[1], reverse=True)
     top_n = predictions[:n]
    
-    # Format with posters
     res = []
     for m_id, score in top_n:
         title = id_to_title.get(m_id, "Unknown")
@@ -130,6 +147,7 @@ def get_top_recommendations(uid, model_type="SVD", alpha=0.7, n=10):
             "Poster": poster
         })
     return pd.DataFrame(res)
+
 
 def calculate_metrics(predictions, threshold=3.5):
     rmse = accuracy.rmse(predictions, verbose=False)
@@ -150,7 +168,8 @@ def calculate_metrics(predictions, threshold=3.5):
     f1 = 2*(avg_p*avg_r)/(avg_p+avg_r) if (avg_p+avg_r) > 0 else 0
     return {"RMSE": rmse, "MAE": mae, "Precision": avg_p, "Recall": avg_r, "F1-Score": f1}
 
-# UI INTERFACE
+
+#UI INTERFACE
 st.title("Multi-model Hybrid Movie Recommender")
 
 tabs = st.tabs(["Content-Based", "Collaborative", "Hybrid System", "Model Evaluation"])
@@ -173,6 +192,8 @@ with tabs[0]:
             with cols[i % 5]:
                 if poster_url:
                     st.image(poster_url, use_container_width=True)
+                else:
+                    st.write("No poster")
                 st.write(f"**{title}**")
                 st.write(f"Match: {score*100:.1f}%")
 
@@ -191,8 +212,10 @@ with tabs[1]:
                 with cols[i % 5]:
                     if row['Poster']:
                         st.image(row['Poster'], use_container_width=True)
+                    else:
+                        st.write("No poster")
                     st.write(f"**{row['Title']}**")
-                    st.write(f" {row['Predicted Rating']}")
+                    st.write(f"{row['Predicted Rating']}")
 
 # TAB 3: HYBRID SYSTEM
 with tabs[2]:
@@ -210,10 +233,12 @@ with tabs[2]:
                 with cols[i % 5]:
                     if row['Poster']:
                         st.image(row['Poster'], use_container_width=True)
+                    else:
+                        st.write("No poster")
                     st.write(f"**{row['Title']}**")
-                    st.write(f" {row['Predicted Rating']}")
+                    st.write(f"{row['Predicted Rating']}")
 
-# TAB 4: EVALUATION 
+# TAB 4: EVALUATION
 with tabs[3]:
     st.header("System Evaluation Metrics")
     if st.button("Generate Performance Report"):
